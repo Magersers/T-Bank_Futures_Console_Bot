@@ -44,9 +44,20 @@ class Position:
 
 
 class FuturesTraderBot:
-    def __init__(self, token: str, account_id: str, figi: str, max_long: int, max_short: int) -> None:
-        self.token = token
-        self.account_id = account_id
+    def __init__(
+        self,
+        long_token: str,
+        long_account_id: str,
+        short_token: str,
+        short_account_id: str,
+        figi: str,
+        max_long: int,
+        max_short: int,
+    ) -> None:
+        self.long_token = long_token
+        self.long_account_id = long_account_id
+        self.short_token = short_token
+        self.short_account_id = short_account_id
         self.figi = figi
         self.max_long = max_long
         self.max_short = max_short
@@ -55,6 +66,8 @@ class FuturesTraderBot:
         self.long_positions: list[Position] = []
         self.short_positions: list[Position] = []
         self.cooldown_until: float = 0
+        self.long_client: Client | None = None
+        self.short_client: Client | None = None
 
     @staticmethod
     def _build_lot_plan(total_lots: int) -> list[int]:
@@ -77,9 +90,13 @@ class FuturesTraderBot:
             f"План SHORT: {self.short_plan or [0]} (макс {MAX_ORDERS_PER_SIDE} сделок на сторону)"
         )
 
-        with Client(self.token) as client:
+        with Client(self.long_token) as market_client, Client(self.short_token) as short_client:
+            self.long_client = market_client
+            self.short_client = short_client
             try:
-                for market_data in client.market_data_stream.market_data_stream(self._market_data_request_iterator()):
+                for market_data in market_client.market_data_stream.market_data_stream(
+                    self._market_data_request_iterator()
+                ):
                     if not market_data.orderbook:
                         continue
 
@@ -89,11 +106,11 @@ class FuturesTraderBot:
 
                     bid = self._quotation_to_decimal(orderbook.bids[0].price)
                     ask = self._quotation_to_decimal(orderbook.asks[0].price)
-                    self.check_exits(client, bid=bid, ask=ask)
+                    self.check_exits(bid=bid, ask=ask)
 
                     now = time.time()
                     if now >= self.cooldown_until:
-                        self.ensure_entries(client, bid=bid, ask=ask)
+                        self.ensure_entries(bid=bid, ask=ask)
             except KeyboardInterrupt:
                 print("\nОстановка по Ctrl+C")
 
@@ -111,20 +128,30 @@ class FuturesTraderBot:
     def _quotation_to_decimal(quotation) -> Decimal:
         return Decimal(quotation.units) + Decimal(quotation.nano) / Decimal(1_000_000_000)
 
-    def ensure_entries(self, client: Client, bid: Decimal, ask: Decimal) -> None:
-        self._open_missing_positions(client, side="long", entry_price=ask)
-        self._open_missing_positions(client, side="short", entry_price=bid)
+    def ensure_entries(self, bid: Decimal, ask: Decimal) -> None:
+        self._open_missing_positions(side="long", entry_price=ask)
+        self._open_missing_positions(side="short", entry_price=bid)
 
-    def _open_missing_positions(self, client: Client, side: Side, entry_price: Decimal) -> None:
+    def _open_missing_positions(self, side: Side, entry_price: Decimal) -> None:
         positions = self.long_positions if side == "long" else self.short_positions
         plan = self.long_plan if side == "long" else self.short_plan
 
         while len(positions) < len(plan):
             quantity = plan[len(positions)]
-            self.open_position(client, side=side, price=entry_price, quantity=quantity)
+            self.open_position(side=side, price=entry_price, quantity=quantity)
             positions = self.long_positions if side == "long" else self.short_positions
 
-    def open_position(self, client: Client, side: Side, price: Decimal, quantity: int) -> None:
+    def _get_client_and_account(self, side: Side) -> tuple[Client, str]:
+        if side == "long":
+            if self.long_client is None:
+                raise RuntimeError("LONG client не инициализирован")
+            return self.long_client, self.long_account_id
+        if self.short_client is None:
+            raise RuntimeError("SHORT client не инициализирован")
+        return self.short_client, self.short_account_id
+
+    def open_position(self, side: Side, price: Decimal, quantity: int) -> None:
+        client, account_id = self._get_client_and_account(side)
         direction = OrderDirection.ORDER_DIRECTION_BUY if side == "long" else OrderDirection.ORDER_DIRECTION_SELL
         oid = str(uuid.uuid4())
 
@@ -133,7 +160,7 @@ class FuturesTraderBot:
             figi=self.figi,
             quantity=quantity,
             direction=direction,
-            account_id=self.account_id,
+            account_id=account_id,
             order_type=OrderType.ORDER_TYPE_MARKET,
             order_id=oid,
         )
@@ -146,11 +173,11 @@ class FuturesTraderBot:
 
         print(f"[OPEN] {side.upper()} {quantity} лот(а/ов) @ {price} (id={oid})")
 
-    def check_exits(self, client: Client, bid: Decimal, ask: Decimal) -> None:
-        self.long_positions = self._check_side(client, self.long_positions, exec_price=bid)
-        self.short_positions = self._check_side(client, self.short_positions, exec_price=ask)
+    def check_exits(self, bid: Decimal, ask: Decimal) -> None:
+        self.long_positions = self._check_side(self.long_positions, exec_price=bid)
+        self.short_positions = self._check_side(self.short_positions, exec_price=ask)
 
-    def _check_side(self, client: Client, positions: list[Position], exec_price: Decimal) -> list[Position]:
+    def _check_side(self, positions: list[Position], exec_price: Decimal) -> list[Position]:
         alive: list[Position] = []
 
         for pos in positions:
@@ -158,9 +185,9 @@ class FuturesTraderBot:
             sl_hit = self._is_stop_loss(pos, exec_price)
 
             if tp_hit:
-                self.close_position(client, pos, exec_price, reason="TAKE_PROFIT")
+                self.close_position(pos, exec_price, reason="TAKE_PROFIT")
             elif sl_hit:
-                self.close_position(client, pos, exec_price, reason="STOP_LOSS")
+                self.close_position(pos, exec_price, reason="STOP_LOSS")
                 self.cooldown_until = time.time() + COOLDOWN_SECONDS
             else:
                 alive.append(pos)
@@ -185,7 +212,8 @@ class FuturesTraderBot:
     def _calculate_net_pnl_pct(self, pos: Position, exec_price: Decimal) -> Decimal:
         return self._calculate_gross_pnl_pct(pos, exec_price) - COMMISSION_PCT
 
-    def close_position(self, client: Client, pos: Position, price: Decimal, reason: str) -> None:
+    def close_position(self, pos: Position, price: Decimal, reason: str) -> None:
+        client, account_id = self._get_client_and_account(pos.side)
         direction = (
             OrderDirection.ORDER_DIRECTION_SELL
             if pos.side == "long"
@@ -198,7 +226,7 @@ class FuturesTraderBot:
             figi=self.figi,
             quantity=pos.quantity,
             direction=direction,
-            account_id=self.account_id,
+            account_id=account_id,
             order_type=OrderType.ORDER_TYPE_MARKET,
             order_id=oid,
         )
@@ -248,15 +276,24 @@ def collect_settings() -> dict:
     cached = load_config()
     print("Введите параметры (Enter = взять из кэша):")
 
-    token = ask("Токен T-Bank Invest API", cached.get("token"))
-    account_id = ask("ID портфеля (account_id)", cached.get("account_id"))
+    cached_long_token = cached.get("long_token") or cached.get("token")
+    cached_long_account = cached.get("long_account_id") or cached.get("account_id")
+    cached_short_token = cached.get("short_token") or cached_long_token
+    cached_short_account = cached.get("short_account_id") or cached_long_account
+
+    long_token = ask("Токен LONG (основной аккаунт)", cached_long_token)
+    long_account_id = ask("ID портфеля LONG (account_id)", cached_long_account)
+    short_token = ask("Токен SHORT (второй аккаунт)", cached_short_token)
+    short_account_id = ask("ID портфеля SHORT (account_id)", cached_short_account)
     figi = ask("FIGI фьючерса", cached.get("figi"))
     max_long = ask_lots("Общий объем лотов в LONG (0..N)", cached.get("max_long", 0))
     max_short = ask_lots("Общий объем лотов в SHORT (0..N)", cached.get("max_short", 0))
 
     settings = {
-        "token": token,
-        "account_id": account_id,
+        "long_token": long_token,
+        "long_account_id": long_account_id,
+        "short_token": short_token,
+        "short_account_id": short_account_id,
         "figi": figi,
         "max_long": max_long,
         "max_short": max_short,
