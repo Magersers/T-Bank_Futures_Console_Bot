@@ -26,7 +26,7 @@ from t_tech.invest import (
 CONFIG_DIR = Path.home() / ".tbank_futures_bot"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 MIN_NET_PROFIT_PCT = Decimal("0.09")  # минимальная чистая прибыль, %
-STOP_LOSS = Decimal("0.006")  # 0.6%
+STOP_LOSS = Decimal("0.001")  # 0.1%
 COMMISSION_PCT = Decimal("0.05")  # 0.05% комиссии на сделку (вычитается в отчете)
 MAX_ORDERS_PER_SIDE = 3
 
