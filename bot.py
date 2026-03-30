@@ -26,15 +26,17 @@ from t_tech.invest import (
 CONFIG_DIR = Path.home() / ".tbank_futures_bot"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 MIN_NET_PROFIT_PCT = Decimal("0.09")  # минимальная чистая прибыль, %
-STOP_LOSS = Decimal("0.001")  # 0.1%
+STOP_LOSS = Decimal("0.006")  # 0.6%
 COMMISSION_PCT = Decimal("0.05")  # 0.05% комиссии на сделку (вычитается в отчете)
 MAX_ORDERS_PER_SIDE = 3
+ENTRY_DEVIATION = Decimal("0.1")  # шаг цены для открытия следующей сделки
 
 Side = Literal["long", "short"]
 
 
 @dataclass
 class Position:
+    level: int
     side: Side
     entry_price: Decimal
     quantity: int
@@ -61,8 +63,9 @@ class FuturesTraderBot:
         self.max_short = max_short
         self.long_plan = self._build_lot_plan(max_long)
         self.short_plan = self._build_lot_plan(max_short)
-        self.long_positions: list[Position] = []
-        self.short_positions: list[Position] = []
+        self.long_positions: dict[int, Position] = {}
+        self.short_positions: dict[int, Position] = {}
+        self.entry_trigger_state: dict[tuple[Side, int], bool] = {}
         self.long_client: Client | None = None
         self.short_client: Client | None = None
 
@@ -131,10 +134,36 @@ class FuturesTraderBot:
         positions = self.long_positions if side == "long" else self.short_positions
         plan = self.long_plan if side == "long" else self.short_plan
 
-        while len(positions) < len(plan):
-            quantity = plan[len(positions)]
-            self.open_position(side=side, price=entry_price, quantity=quantity)
-            positions = self.long_positions if side == "long" else self.short_positions
+        for level in range(1, len(plan) + 1):
+            if level in positions:
+                continue
+
+            if level == 1:
+                self.open_position(side=side, level=level, price=entry_price, quantity=plan[0])
+                return
+
+            previous_position = positions.get(level - 1)
+            if previous_position is None:
+                self.entry_trigger_state[(side, level)] = False
+                continue
+
+            trigger_hit = self._is_entry_trigger_hit(
+                side=side,
+                current_price=entry_price,
+                previous_entry=previous_position.entry_price,
+            )
+            key = (side, level)
+            was_trigger_hit = self.entry_trigger_state.get(key, False)
+            self.entry_trigger_state[key] = trigger_hit
+            if trigger_hit and not was_trigger_hit:
+                self.open_position(side=side, level=level, price=entry_price, quantity=plan[level - 1])
+            return
+
+    @staticmethod
+    def _is_entry_trigger_hit(side: Side, current_price: Decimal, previous_entry: Decimal) -> bool:
+        if side == "long":
+            return current_price <= previous_entry - ENTRY_DEVIATION
+        return current_price >= previous_entry + ENTRY_DEVIATION
 
     def _get_client_and_account(self, side: Side) -> tuple[Client, str]:
         if side == "long":
@@ -145,7 +174,7 @@ class FuturesTraderBot:
             raise RuntimeError("SHORT client не инициализирован")
         return self.short_client, self.short_account_id
 
-    def open_position(self, side: Side, price: Decimal, quantity: int) -> None:
+    def open_position(self, side: Side, level: int, price: Decimal, quantity: int) -> None:
         client, account_id = self._get_client_and_account(side)
         direction = OrderDirection.ORDER_DIRECTION_BUY if side == "long" else OrderDirection.ORDER_DIRECTION_SELL
         oid = str(uuid.uuid4())
@@ -160,22 +189,20 @@ class FuturesTraderBot:
             order_id=oid,
         )
 
-        position = Position(side=side, entry_price=price, quantity=quantity, order_id=oid)
+        position = Position(level=level, side=side, entry_price=price, quantity=quantity, order_id=oid)
         if side == "long":
-            self.long_positions.append(position)
+            self.long_positions[level] = position
         else:
-            self.short_positions.append(position)
+            self.short_positions[level] = position
 
-        print(f"[OPEN] {side.upper()} {quantity} лот(а/ов) @ {price} (id={oid})")
+        print(f"[OPEN] {side.upper()} L{level} {quantity} лот(а/ов) @ {price} (id={oid})")
 
     def check_exits(self, bid: Decimal, ask: Decimal) -> None:
-        self.long_positions = self._check_side(self.long_positions, exec_price=bid)
-        self.short_positions = self._check_side(self.short_positions, exec_price=ask)
+        self._check_side(self.long_positions, exec_price=bid)
+        self._check_side(self.short_positions, exec_price=ask)
 
-    def _check_side(self, positions: list[Position], exec_price: Decimal) -> list[Position]:
-        alive: list[Position] = []
-
-        for pos in positions:
+    def _check_side(self, positions: dict[int, Position], exec_price: Decimal) -> None:
+        for level, pos in sorted(list(positions.items())):
             tp_hit = self._is_take_profit(pos, exec_price)
             sl_hit = self._is_stop_loss(pos, exec_price)
 
@@ -184,9 +211,8 @@ class FuturesTraderBot:
             elif sl_hit:
                 self.close_position(pos, exec_price, reason="STOP_LOSS")
             else:
-                alive.append(pos)
-
-        return alive
+                continue
+            positions.pop(level, None)
 
     def _is_take_profit(self, pos: Position, exec_price: Decimal) -> bool:
         net_pnl_pct = self._calculate_net_pnl_pct(pos, exec_price)
@@ -230,7 +256,7 @@ class FuturesTraderBot:
 
         pnl_label = "ПРИБЫЛЬ" if net_pnl_pct > 0 else "УБЫТОК"
         print(
-            f"[CLOSE][{reason}] {pos.side.upper()} qty={pos.quantity} @ {price}; "
+            f"[CLOSE][{reason}] {pos.side.upper()} L{pos.level} qty={pos.quantity} @ {price}; "
             f"entry={pos.entry_price}; gross={gross_pnl_pct:.4f}%; "
             f"fee={COMMISSION_PCT:.4f}%; net={net_pnl_pct:.4f}% => {pnl_label}"
         )
