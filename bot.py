@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import json
-import time
 import uuid
 from dataclasses import dataclass
 from decimal import Decimal
@@ -27,9 +26,8 @@ from t_tech.invest import (
 CONFIG_DIR = Path.home() / ".tbank_futures_bot"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 MIN_NET_PROFIT_PCT = Decimal("0.09")  # минимальная чистая прибыль, %
-STOP_LOSS = Decimal("0.002")  # 0.2%
+STOP_LOSS = Decimal("0.006")  # 0.6%
 COMMISSION_PCT = Decimal("0.05")  # 0.05% комиссии на сделку (вычитается в отчете)
-COOLDOWN_SECONDS = 120
 MAX_ORDERS_PER_SIDE = 3
 
 Side = Literal["long", "short"]
@@ -65,7 +63,6 @@ class FuturesTraderBot:
         self.short_plan = self._build_lot_plan(max_short)
         self.long_positions: list[Position] = []
         self.short_positions: list[Position] = []
-        self.cooldown_until: float = 0
         self.long_client: Client | None = None
         self.short_client: Client | None = None
 
@@ -108,9 +105,7 @@ class FuturesTraderBot:
                     ask = self._quotation_to_decimal(orderbook.asks[0].price)
                     self.check_exits(bid=bid, ask=ask)
 
-                    now = time.time()
-                    if now >= self.cooldown_until:
-                        self.ensure_entries(bid=bid, ask=ask)
+                    self.ensure_entries(bid=bid, ask=ask)
             except KeyboardInterrupt:
                 print("\nОстановка по Ctrl+C")
 
@@ -188,7 +183,6 @@ class FuturesTraderBot:
                 self.close_position(pos, exec_price, reason="TAKE_PROFIT")
             elif sl_hit:
                 self.close_position(pos, exec_price, reason="STOP_LOSS")
-                self.cooldown_until = time.time() + COOLDOWN_SECONDS
             else:
                 alive.append(pos)
 
