@@ -25,11 +25,11 @@ from t_tech.invest import (
 
 CONFIG_DIR = Path.home() / ".tbank_futures_bot"
 CONFIG_FILE = CONFIG_DIR / "config.json"
-MIN_NET_PROFIT_PCT = Decimal("0.09")  # минимальная чистая прибыль, %
-STOP_LOSS = Decimal("0.006")  # 0.6%
-COMMISSION_PCT = Decimal("0.05")  # 0.05% комиссии на сделку (вычитается в отчете)
+DEFAULT_MIN_NET_PROFIT_PCT = Decimal("0.09")
+DEFAULT_STOP_LOSS_PCT = Decimal("0.6")
+DEFAULT_COMMISSION_PCT = Decimal("0.05")
+DEFAULT_ENTRY_DEVIATION_PCT = Decimal("0.15")
 MAX_ORDERS_PER_SIDE = 3
-ENTRY_DEVIATION_PCT = Decimal("0.15")  # шаг (%) для открытия следующей сделки
 
 Side = Literal["long", "short"]
 
@@ -53,6 +53,10 @@ class FuturesTraderBot:
         figi: str,
         max_long: int,
         max_short: int,
+        min_net_profit_pct: Decimal,
+        stop_loss_pct: Decimal,
+        commission_pct: Decimal,
+        entry_deviation_pct: Decimal,
     ) -> None:
         self.long_token = long_token
         self.long_account_id = long_account_id
@@ -61,6 +65,10 @@ class FuturesTraderBot:
         self.figi = figi
         self.max_long = max_long
         self.max_short = max_short
+        self.min_net_profit_pct = min_net_profit_pct
+        self.stop_loss_pct = stop_loss_pct
+        self.commission_pct = commission_pct
+        self.entry_deviation_pct = entry_deviation_pct
         self.long_plan = self._build_lot_plan(max_long)
         self.short_plan = self._build_lot_plan(max_short)
         self.long_positions: dict[int, Position] = {}
@@ -159,9 +167,8 @@ class FuturesTraderBot:
                 self.open_position(side=side, level=level, price=entry_price, quantity=plan[level - 1])
             return
 
-    @staticmethod
-    def _is_entry_trigger_hit(side: Side, current_price: Decimal, previous_entry: Decimal) -> bool:
-        deviation_abs = previous_entry * (ENTRY_DEVIATION_PCT / Decimal(100))
+    def _is_entry_trigger_hit(self, side: Side, current_price: Decimal, previous_entry: Decimal) -> bool:
+        deviation_abs = previous_entry * (self.entry_deviation_pct / Decimal(100))
         if side == "long":
             return current_price <= previous_entry - deviation_abs
         return current_price >= previous_entry + deviation_abs
@@ -217,11 +224,11 @@ class FuturesTraderBot:
 
     def _is_take_profit(self, pos: Position, exec_price: Decimal) -> bool:
         net_pnl_pct = self._calculate_net_pnl_pct(pos, exec_price)
-        return net_pnl_pct >= MIN_NET_PROFIT_PCT
+        return net_pnl_pct >= self.min_net_profit_pct
 
     def _is_stop_loss(self, pos: Position, exec_price: Decimal) -> bool:
         gross_pnl_pct = self._calculate_gross_pnl_pct(pos, exec_price)
-        return gross_pnl_pct <= -(STOP_LOSS * Decimal(100))
+        return gross_pnl_pct <= -self.stop_loss_pct
 
     @staticmethod
     def _calculate_gross_pnl_pct(pos: Position, exec_price: Decimal) -> Decimal:
@@ -231,7 +238,7 @@ class FuturesTraderBot:
         return gross_pnl_pct
 
     def _calculate_net_pnl_pct(self, pos: Position, exec_price: Decimal) -> Decimal:
-        return self._calculate_gross_pnl_pct(pos, exec_price) - COMMISSION_PCT
+        return self._calculate_gross_pnl_pct(pos, exec_price) - self.commission_pct
 
     def close_position(self, pos: Position, price: Decimal, reason: str) -> None:
         client, account_id = self._get_client_and_account(pos.side)
@@ -259,7 +266,7 @@ class FuturesTraderBot:
         print(
             f"[CLOSE][{reason}] {pos.side.upper()} L{pos.level} qty={pos.quantity} @ {price}; "
             f"entry={pos.entry_price}; gross={gross_pnl_pct:.4f}%; "
-            f"fee={COMMISSION_PCT:.4f}%; net={net_pnl_pct:.4f}% => {pnl_label}"
+            f"fee={self.commission_pct:.4f}%; net={net_pnl_pct:.4f}% => {pnl_label}"
         )
 
 
@@ -293,6 +300,21 @@ def ask_lots(label: str, default: int = 0) -> int:
         print("Ограничение: минимум 0 лотов на сторону.")
 
 
+def ask_decimal_pct(label: str, default: Decimal) -> Decimal:
+    while True:
+        raw = ask(label, str(default))
+        raw = raw.replace(",", ".")
+        try:
+            value = Decimal(raw)
+        except Exception:
+            print("Введите корректное число (например: 0.09)")
+            continue
+        if value < 0:
+            print("Значение должно быть >= 0")
+            continue
+        return value
+
+
 def collect_settings() -> dict:
     cached = load_config()
     print("Введите параметры (Enter = взять из кэша):")
@@ -309,6 +331,14 @@ def collect_settings() -> dict:
     figi = ask("FIGI фьючерса", cached.get("figi"))
     max_long = ask_lots("Общий объем лотов в LONG (0..N)", cached.get("max_long", 0))
     max_short = ask_lots("Общий объем лотов в SHORT (0..N)", cached.get("max_short", 0))
+    min_net_profit_pct = ask_decimal_pct(
+        "Минимальная чистая прибыль TP, %", Decimal(str(cached.get("min_net_profit_pct", DEFAULT_MIN_NET_PROFIT_PCT)))
+    )
+    stop_loss_pct = ask_decimal_pct("Стоп-лосс, %", Decimal(str(cached.get("stop_loss_pct", DEFAULT_STOP_LOSS_PCT))))
+    commission_pct = ask_decimal_pct("Комиссия, %", Decimal(str(cached.get("commission_pct", DEFAULT_COMMISSION_PCT))))
+    entry_deviation_pct = ask_decimal_pct(
+        "Отклонение цены для L2/L3, %", Decimal(str(cached.get("entry_deviation_pct", DEFAULT_ENTRY_DEVIATION_PCT)))
+    )
 
     settings = {
         "long_token": long_token,
@@ -318,8 +348,20 @@ def collect_settings() -> dict:
         "figi": figi,
         "max_long": max_long,
         "max_short": max_short,
+        "min_net_profit_pct": min_net_profit_pct,
+        "stop_loss_pct": stop_loss_pct,
+        "commission_pct": commission_pct,
+        "entry_deviation_pct": entry_deviation_pct,
     }
-    save_config(settings)
+    save_config(
+        {
+            **settings,
+            "min_net_profit_pct": str(min_net_profit_pct),
+            "stop_loss_pct": str(stop_loss_pct),
+            "commission_pct": str(commission_pct),
+            "entry_deviation_pct": str(entry_deviation_pct),
+        }
+    )
     return settings
 
 
