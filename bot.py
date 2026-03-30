@@ -29,7 +29,7 @@ MIN_NET_PROFIT_PCT = Decimal("0.09")  # минимальная чистая пр
 STOP_LOSS = Decimal("0.006")  # 0.6%
 COMMISSION_PCT = Decimal("0.05")  # 0.05% комиссии на сделку (вычитается в отчете)
 MAX_ORDERS_PER_SIDE = 3
-ENTRY_DEVIATION = Decimal("0.15")  # шаг цены для открытия следующей сделки
+ENTRY_DEVIATION_PCT = Decimal("0.15")  # шаг (%) для открытия следующей сделки
 
 Side = Literal["long", "short"]
 
@@ -161,9 +161,10 @@ class FuturesTraderBot:
 
     @staticmethod
     def _is_entry_trigger_hit(side: Side, current_price: Decimal, previous_entry: Decimal) -> bool:
+        deviation_abs = previous_entry * (ENTRY_DEVIATION_PCT / Decimal(100))
         if side == "long":
-            return current_price <= previous_entry - ENTRY_DEVIATION
-        return current_price >= previous_entry + ENTRY_DEVIATION
+            return current_price <= previous_entry - deviation_abs
+        return current_price >= previous_entry + deviation_abs
 
     def _get_client_and_account(self, side: Side) -> tuple[Client, str]:
         if side == "long":
