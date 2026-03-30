@@ -26,7 +26,7 @@ from t_tech.invest import (
 
 CONFIG_DIR = Path.home() / ".tbank_futures_bot"
 CONFIG_FILE = CONFIG_DIR / "config.json"
-TAKE_PROFIT = Decimal("0.0006")  # 0.06%
+MIN_NET_PROFIT_PCT = Decimal("0.09")  # минимальная чистая прибыль, %
 STOP_LOSS = Decimal("0.002")  # 0.2%
 COMMISSION_PCT = Decimal("0.05")  # 0.05% комиссии на сделку (вычитается в отчете)
 COOLDOWN_SECONDS = 120
@@ -89,12 +89,11 @@ class FuturesTraderBot:
 
                     bid = self._quotation_to_decimal(orderbook.bids[0].price)
                     ask = self._quotation_to_decimal(orderbook.asks[0].price)
-                    price = (bid + ask) / Decimal(2)
-                    self.check_exits(client, price)
+                    self.check_exits(client, bid=bid, ask=ask)
 
                     now = time.time()
                     if now >= self.cooldown_until:
-                        self.ensure_entries(client, price)
+                        self.ensure_entries(client, bid=bid, ask=ask)
             except KeyboardInterrupt:
                 print("\nОстановка по Ctrl+C")
 
@@ -112,17 +111,17 @@ class FuturesTraderBot:
     def _quotation_to_decimal(quotation) -> Decimal:
         return Decimal(quotation.units) + Decimal(quotation.nano) / Decimal(1_000_000_000)
 
-    def ensure_entries(self, client: Client, price: Decimal) -> None:
-        self._open_missing_positions(client, side="long", price=price)
-        self._open_missing_positions(client, side="short", price=price)
+    def ensure_entries(self, client: Client, bid: Decimal, ask: Decimal) -> None:
+        self._open_missing_positions(client, side="long", entry_price=ask)
+        self._open_missing_positions(client, side="short", entry_price=bid)
 
-    def _open_missing_positions(self, client: Client, side: Side, price: Decimal) -> None:
+    def _open_missing_positions(self, client: Client, side: Side, entry_price: Decimal) -> None:
         positions = self.long_positions if side == "long" else self.short_positions
         plan = self.long_plan if side == "long" else self.short_plan
 
         while len(positions) < len(plan):
             quantity = plan[len(positions)]
-            self.open_position(client, side=side, price=price, quantity=quantity)
+            self.open_position(client, side=side, price=entry_price, quantity=quantity)
             positions = self.long_positions if side == "long" else self.short_positions
 
     def open_position(self, client: Client, side: Side, price: Decimal, quantity: int) -> None:
@@ -147,40 +146,44 @@ class FuturesTraderBot:
 
         print(f"[OPEN] {side.upper()} {quantity} лот(а/ов) @ {price} (id={oid})")
 
-    def check_exits(self, client: Client, price: Decimal) -> None:
-        self.long_positions = self._check_side(client, self.long_positions, price)
-        self.short_positions = self._check_side(client, self.short_positions, price)
+    def check_exits(self, client: Client, bid: Decimal, ask: Decimal) -> None:
+        self.long_positions = self._check_side(client, self.long_positions, exec_price=bid)
+        self.short_positions = self._check_side(client, self.short_positions, exec_price=ask)
 
-    def _check_side(self, client: Client, positions: list[Position], price: Decimal) -> list[Position]:
+    def _check_side(self, client: Client, positions: list[Position], exec_price: Decimal) -> list[Position]:
         alive: list[Position] = []
 
         for pos in positions:
-            tp_hit = self._is_take_profit(pos, price)
-            sl_hit = self._is_stop_loss(pos, price)
+            tp_hit = self._is_take_profit(pos, exec_price)
+            sl_hit = self._is_stop_loss(pos, exec_price)
 
             if tp_hit:
-                self.close_position(client, pos, price, reason="TAKE_PROFIT")
+                self.close_position(client, pos, exec_price, reason="TAKE_PROFIT")
             elif sl_hit:
-                self.close_position(client, pos, price, reason="STOP_LOSS")
+                self.close_position(client, pos, exec_price, reason="STOP_LOSS")
                 self.cooldown_until = time.time() + COOLDOWN_SECONDS
             else:
                 alive.append(pos)
 
         return alive
 
-    def _is_take_profit(self, pos: Position, price: Decimal) -> bool:
-        if pos.side == "long":
-            target = pos.entry_price * (Decimal(1) + TAKE_PROFIT)
-            return price >= target
-        target = pos.entry_price * (Decimal(1) - TAKE_PROFIT)
-        return price <= target
+    def _is_take_profit(self, pos: Position, exec_price: Decimal) -> bool:
+        net_pnl_pct = self._calculate_net_pnl_pct(pos, exec_price)
+        return net_pnl_pct >= MIN_NET_PROFIT_PCT
 
-    def _is_stop_loss(self, pos: Position, price: Decimal) -> bool:
-        if pos.side == "long":
-            threshold = pos.entry_price * (Decimal(1) - STOP_LOSS)
-            return price <= threshold
-        threshold = pos.entry_price * (Decimal(1) + STOP_LOSS)
-        return price >= threshold
+    def _is_stop_loss(self, pos: Position, exec_price: Decimal) -> bool:
+        gross_pnl_pct = self._calculate_gross_pnl_pct(pos, exec_price)
+        return gross_pnl_pct <= -(STOP_LOSS * Decimal(100))
+
+    @staticmethod
+    def _calculate_gross_pnl_pct(pos: Position, exec_price: Decimal) -> Decimal:
+        gross_pnl_pct = ((exec_price / pos.entry_price) - Decimal(1)) * Decimal(100)
+        if pos.side == "short":
+            gross_pnl_pct = -gross_pnl_pct
+        return gross_pnl_pct
+
+    def _calculate_net_pnl_pct(self, pos: Position, exec_price: Decimal) -> Decimal:
+        return self._calculate_gross_pnl_pct(pos, exec_price) - COMMISSION_PCT
 
     def close_position(self, client: Client, pos: Position, price: Decimal, reason: str) -> None:
         direction = (
@@ -200,10 +203,8 @@ class FuturesTraderBot:
             order_id=oid,
         )
 
-        gross_pnl_pct = ((price / pos.entry_price) - Decimal(1)) * Decimal(100)
-        if pos.side == "short":
-            gross_pnl_pct = -gross_pnl_pct
-        net_pnl_pct = gross_pnl_pct - COMMISSION_PCT
+        gross_pnl_pct = self._calculate_gross_pnl_pct(pos, price)
+        net_pnl_pct = self._calculate_net_pnl_pct(pos, price)
 
         pnl_label = "ПРИБЫЛЬ" if net_pnl_pct > 0 else "УБЫТОК"
         print(
