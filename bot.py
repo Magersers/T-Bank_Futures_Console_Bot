@@ -29,7 +29,7 @@ DEFAULT_MIN_NET_PROFIT_PCT = Decimal("0.09")
 DEFAULT_STOP_LOSS_PCT = Decimal("0.6")
 DEFAULT_COMMISSION_PCT = Decimal("0.05")
 DEFAULT_ENTRY_DEVIATION_PCT = Decimal("0.15")
-MAX_ORDERS_PER_SIDE = 3
+DEFAULT_MAX_ORDERS_PER_SIDE = 3
 
 Side = Literal["long", "short"]
 
@@ -57,6 +57,7 @@ class FuturesTraderBot:
         stop_loss_pct: Decimal,
         commission_pct: Decimal,
         entry_deviation_pct: Decimal,
+        max_orders_per_side: int,
     ) -> None:
         self.long_token = long_token
         self.long_account_id = long_account_id
@@ -69,6 +70,7 @@ class FuturesTraderBot:
         self.stop_loss_pct = stop_loss_pct
         self.commission_pct = commission_pct
         self.entry_deviation_pct = entry_deviation_pct
+        self.max_orders_per_side = max_orders_per_side
         self.long_plan = self._build_lot_plan(max_long)
         self.short_plan = self._build_lot_plan(max_short)
         self.long_positions: dict[int, Position] = {}
@@ -77,13 +79,12 @@ class FuturesTraderBot:
         self.long_client: Client | None = None
         self.short_client: Client | None = None
 
-    @staticmethod
-    def _build_lot_plan(total_lots: int) -> list[int]:
-        """Разбивает общий объем на максимум 3 независимые сделки."""
+    def _build_lot_plan(self, total_lots: int) -> list[int]:
+        """Разбивает общий объем на максимум max_orders_per_side независимых сделок."""
         if total_lots <= 0:
             return []
 
-        chunks = min(MAX_ORDERS_PER_SIDE, total_lots)
+        chunks = min(self.max_orders_per_side, total_lots)
         base = total_lots // chunks
         remainder = total_lots % chunks
         plan = [base] * chunks
@@ -95,7 +96,7 @@ class FuturesTraderBot:
         print("Запуск бота... Ctrl+C для остановки")
         print(
             f"План LONG: {self.long_plan or [0]} | "
-            f"План SHORT: {self.short_plan or [0]} (макс {MAX_ORDERS_PER_SIDE} сделок на сторону)"
+            f"План SHORT: {self.short_plan or [0]} (макс {self.max_orders_per_side} сделок на сторону)"
         )
 
         with Client(self.long_token) as market_client, Client(self.short_token) as short_client:
@@ -300,6 +301,19 @@ def ask_lots(label: str, default: int = 0) -> int:
         print("Ограничение: минимум 0 лотов на сторону.")
 
 
+def ask_positive_int(label: str, default: int) -> int:
+    while True:
+        raw = ask(label, str(default))
+        try:
+            value = int(raw)
+        except ValueError:
+            print("Введите целое число от 1 и выше")
+            continue
+        if value >= 1:
+            return value
+        print("Ограничение: минимум 1.")
+
+
 def ask_decimal_pct(label: str, default: Decimal) -> Decimal:
     while True:
         raw = ask(label, str(default))
@@ -339,6 +353,9 @@ def collect_settings() -> dict:
     entry_deviation_pct = ask_decimal_pct(
         "Отклонение цены для L2/L3, %", Decimal(str(cached.get("entry_deviation_pct", DEFAULT_ENTRY_DEVIATION_PCT)))
     )
+    max_orders_per_side = ask_positive_int(
+        "Максимум сделок на сторону", int(cached.get("max_orders_per_side", DEFAULT_MAX_ORDERS_PER_SIDE))
+    )
 
     settings = {
         "long_token": long_token,
@@ -352,6 +369,7 @@ def collect_settings() -> dict:
         "stop_loss_pct": stop_loss_pct,
         "commission_pct": commission_pct,
         "entry_deviation_pct": entry_deviation_pct,
+        "max_orders_per_side": max_orders_per_side,
     }
     save_config(
         {
