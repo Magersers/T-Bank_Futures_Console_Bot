@@ -85,22 +85,16 @@ class FuturesTraderBot:
 
                     orderbook = market_data.orderbook
                     if not orderbook.bids or not orderbook.asks:
-                        print("[WARN] Пустой стакан в стриме")
                         continue
 
                     bid = self._quotation_to_decimal(orderbook.bids[0].price)
                     ask = self._quotation_to_decimal(orderbook.asks[0].price)
                     price = (bid + ask) / Decimal(2)
-                    print(f"[STREAM] bid={bid} ask={ask} mid={price}")
-
                     self.check_exits(client, price)
 
                     now = time.time()
                     if now >= self.cooldown_until:
                         self.ensure_entries(client, price)
-                    else:
-                        left = max(0, int(self.cooldown_until - now))
-                        print(f"[COOLDOWN] до новых входов: {left} сек.")
             except KeyboardInterrupt:
                 print("\nОстановка по Ctrl+C")
 
