@@ -14,7 +14,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Literal
 
-from tinkoff.invest import (
+from t_tech.invest import (
     Client,
     MarketDataRequest,
     OrderBookInstrument,
